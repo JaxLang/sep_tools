@@ -18,12 +18,14 @@ from IPython.display import display, Image
 #from sunpy.time import parse_time
 import astropy.constants as aconst
 import astropy.units as u
+# import speasy as spz
 from sunpy.coordinates import get_horizons_coord
 
 from seppy.loader.psp import psp_isois_load
 from seppy.loader.soho import soho_load
 from seppy.loader.stereo import stereo_load
 from solo_epd_loader import epd_load
+from seppy.loader.bepi import bepi_sixsp_l3_loader as bepi_load
 
 from solarmach import SolarMACH
 
@@ -39,13 +41,13 @@ warnings.filterwarnings(action='ignore', message='The variable "HET_', category=
 # warnings.filterwarnings(action='ignore', message="Note that for the Dataframes containing the flow direction and SC coordinates timestamp position will not be adjusted by 'pos_timestamp'!", module='solo_epd_loader')
 # warnings.filterwarnings(action='once', message="Mean of empty slice", category=RuntimeWarning)
 
-warnings.filterwarnings(action='ignore', category=OptimizeWarning, message='Covariance of the parameters could not be estimated')
-
 # disable unused speasy data provider before importing to speed it up
 os.environ['SPEASY_CORE_DISABLED_PROVIDERS'] = "sscweb,archive,csa"
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", message="Non compliant ISTP file*", category=UserWarning, module="speasy.*")
     import speasy as spz
+
+warnings.filterwarnings(action='ignore', category=OptimizeWarning, message='Covariance of the parameters could not be estimated')
 
 marker_settings = {
     'Solar Orbiter': {'marker': 's', 'color': 'dodgerblue', 'label': 'Solar Orbiter / EPD - HET'},
@@ -54,7 +56,7 @@ marker_settings = {
     'PSP':  {'marker': 'p', 'color': 'purple', 'label': 'PSP / EpiHi - HET'},
     # 'Wind': {'marker': '*', 'color': 'slategray', 'label': 'Wind'},
     # 'STEREO-B': {'marker': 'v', 'color': 'blue', 'label': 'STEREO-B'},
-    # 'BepiColombo': {'marker': 'd', 'color': 'orange', 'label': 'BepiColombo'}
+    'BepiColombo': {'marker': 'd', 'color': 'orange', 'label': 'BepiColombo'}
     }
 
 
@@ -239,20 +241,30 @@ class SpatialEvent:
 
         full_energy_range = [np.nan, np.nan]
         for sc in tqdm(self.spacecraft_list):
-            self.sc_data[sc], self.channel_labels[sc] = load_sc_data(sc, self.channels, [self.start, self.end], self.raw_path, self.resampling, self.offline)
+            # self.sc_data[sc], self.channel_labels[sc] = load_sc_data(sc, self.channels, [self.start, self.end], self.raw_path, self.resampling, self.offline)
 
-            # Collecting the full energy range
-            lbl_tmp = (self.channel_labels[sc]).split('-')
-            s_tmp = float(lbl_tmp[0])
-            e_tmp = float( (lbl_tmp[1]).split(' M')[0])
-            if np.isnan(full_energy_range[0]):
-                full_energy_range[0] = s_tmp
-                full_energy_range[1] = e_tmp
+            sc_df, chn_lbls = load_sc_data(sc, self.channels, [self.start, self.end], self.raw_path, self.resampling, self.offline)
+
+            if isinstance(sc_df , list):
+                print(f"Skipping the {sc} dataset, no measurements found.")
+                self.spacecraft_list.remove(sc)
             else:
-                if (s_tmp < full_energy_range[0]):
+                self.sc_data[sc] = sc_df
+                self.channel_labels[sc] = chn_lbls
+
+
+                # Collecting the full energy range
+                lbl_tmp = (self.channel_labels[sc]).split('-')
+                s_tmp = float(lbl_tmp[0])
+                e_tmp = float( (lbl_tmp[1]).split(' M')[0])
+                if np.isnan(full_energy_range[0]):
                     full_energy_range[0] = s_tmp
-                if (e_tmp > full_energy_range[1]):
                     full_energy_range[1] = e_tmp
+                else:
+                    if (s_tmp < full_energy_range[0]):
+                        full_energy_range[0] = s_tmp
+                    if (e_tmp > full_energy_range[1]):
+                        full_energy_range[1] = e_tmp
         self.energy_range_label = f"{full_energy_range[0]:.1f}-{full_energy_range[1]:.1f} MeV"
 
         print("Data loading complete.")
@@ -328,16 +340,19 @@ class SpatialEvent:
 
     def intercalibrate(self, intercalibration_factors, perform_process=True): # Step 4
         """Adjusts the data based on the given intercalibration values."""
-        for ick in intercalibration_factors.keys():
-            if ick not in self.spacecraft_list:
-                print("This spacecraft is not recognised in this event run:")
-                print(ick)
-                perform_process=False
+        # for ick in intercalibration_factors.keys():
+        #     if ick not in self.spacecraft_list:
+        #         print("This spacecraft is not included in this event run:")
+        #         print(ick)
+        #         perform_process=False
         if len(intercalibration_factors) != len(self.spacecraft_list):
             print("The number of IC factors doesn't match the number of spacecraft.")
             print('Factors for: ', list(intercalibration_factors.keys()))
             print('Spacecraft included in event run: ', self.spacecraft_list)
-            perform_process = False
+            for scl in self.spacecraft_list:
+                if scl not in intercalibration_factors.keys():
+                    print(f'Missing IC factor for {scl}. Unable to perform intercalibration.')
+                    perform_process = False
 
         if perform_process:
             for sc in self.spacecraft_list:
@@ -560,6 +575,12 @@ def horizons_speasy_location_loader(observers, dates, data_path, resampling, sou
         cda_tree = spz.inventories.data_tree.cda
 
         #Download vsw for each observer; convert to df with time index; resample to 15min; add to dict
+        if 'BepiColombo' in observers:
+            # https://cdaweb.gsfc.nasa.gov/misc/NotesB.html#BEPICOLOMBO_HELIO1HR_POSITION
+            # There is no data source for this yet, using default df
+            hc_dict['BepiColombo'] = vsw_df_default
+
+
         if 'PSP' in observers:
             vswd = amda_tree.Parameters.PSP.SWEAP_SPC.psp_spc_mom.psp_spc_vp_mom_nrm
             vswdf = spz.get_data(vswd, start, end, output_format="CDF_ISTP").replace_fillval_by_nan().to_dataframe()
@@ -773,7 +794,7 @@ def solarmach_loop(observers, dates, data_path, resampling, source_loc, vsw_list
             if "Longitudinal separation between body's magnetic footpoint and reference_long" not in tmp_df.columns:
                 print(tmp_df)
                 print(tmp_df.columns)
-                jax=input("There's a problem with the label for the magnetic footpoint. Please contact JT Lang.")
+                jax=input("There's a problem with the label for the magnetic footpoint. Please contact JT Lang: jtlang(at)utu.fi .")
             long_sep.append(tmp_df["Longitudinal separation between body's magnetic footpoint and reference_long"][obs])
 
 
@@ -868,7 +889,7 @@ def move_along_parker_spiral(r_dist, loc, vsw, towards, err_calc):
 ################################################
 ## Data loaders
 ################################################
-def weighted_bin_merge(df0, spacecraft, species, channel_list, header_label, binwidths):
+def weighted_bin_merge(df0, spacecraft, species, channel_list, header_label, binwidths, **kwargs):
     """
     Input:
         - dataframe: with simple columns and time index
@@ -887,13 +908,31 @@ def weighted_bin_merge(df0, spacecraft, species, channel_list, header_label, bin
 
     Parts of this function were improved using AI/ChatGPT on 26 June 2026."""
 
+    PA = np.nan
+    if 'pa' in kwargs:
+        PA = kwargs['pa']
+
+        if spacecraft in ['bepi', 'bepicolombo', 'Bepi', 'BepiColombo']: # create an array of the required bin widths
+            print('Old bepi binwidths: ')
+            print(binwidths)
+            new_bw = []
+            for bnn in binwidths.keys():
+                new_bw.append(binwidths[bnn][PA])
+            binwidths = new_bw
+            print('New bepi binwidths: ')
+            print(binwidths)
+            jax = input('move on?')
+
     # Confirm the species type (electrons hopefully introduced in later versions)
     species = 'protons' if species.lower() == 'p' else 'electrons'
 
     full_channel_list = range(channel_list[0], channel_list[1]+1)
 
     # Collect all relevant header labels.
-    if isinstance(header_label, list):
+    if isinstance(header_label, list) and (spacecraft in ['bepi', 'bepicolombo', 'Bepi', 'BepiColombo']):
+        # Bepi has two parts to the single header value
+        cols = [f"{header_label[0]}{n}{header_label[1]}" for n in full_channel_list]
+    elif isinstance(header_label, list):
         # MultiIndex Columns: (header_label[0], f"{header_label[1]}{n}")
         cols = [(header_label[0], f"{header_label[1]}{n}") for n in full_channel_list]
     else:
@@ -1216,6 +1255,88 @@ def load_sc_data(spacecraft, proton_channels, dates, data_path, resampling, offl
 
 
         return solo, energy_range_lbl
+
+    if 'bepicolombo' == spacecraft:
+        spec = 'Proton' # JAX: update when including electrons
+        bepi_df, bepi_meta = bepi_load(startdate=dates[0].date(),
+                                       enddate=dates[1].date() + dt.timedelta(days=1),
+                                       resample=None,
+                                       path=data_path,
+                                       pos_timestamp='start',
+                                       offline=offline)
+
+        if isinstance(bepi_df, list):
+            print(f"Nothing downloaded for {spacecraft}.")
+            return [], []
+
+        # Remove the specified timezone provided by the data loader
+        bepi_df.index = bepi_df.index.tz_localize(None)
+        print(bepi_df.head())
+        bepi_df.to_csv('bepiwtf.csv')
+
+        # Find channels and bin widths
+        bin_list = proton_channels['BepiColombo']
+        print('bin list: ', bin_list)
+
+        if len(bin_list) == 1:
+            bin_label = f"{bin_list[0]}"
+            bin_list.append(bin_list[0])
+        else:
+            bin_label = f"{bin_list[0]}-{bin_list[1]}"
+
+        bin_width = {}
+        energy_range = []
+
+        for n in range(bin_list[0], bin_list[1]+1):
+            bin_start, bin_end = ([] for i in range(2))
+            bin_width[n] = {}
+            for s in range(5):
+                if f"Side{s}_{spec}_Bins_Low_Energy" in bepi_meta.keys():
+                    bin_s = float(bepi_meta[f"Side{s}_{spec}_Bins_Low_Energy"][f"{spec[0]}{n}"])
+                    bin_e = float(bepi_meta[f"Side{s}_{spec}_Bins_High_Energy"][f"{spec[0]}{n}"])
+
+                    bin_width[n][s] = bin_e - bin_s
+                    bin_start.append(bin_s)
+                    bin_end.append(bin_e)
+
+            if len(energy_range) == 0:
+                energy_range.append(np.nanmean(bin_start))
+        energy_range.append(np.nanmean(bin_end))
+
+        # Get the energy range for labels
+        energy_range_lbl = f"{energy_range[0]:.1f}-{energy_range[1]:.1f} MeV"
+        print('Bepi energy range label: ', energy_range_lbl)
+
+        # Merge the channels
+        print( bepi_df['Side1_P7'].head() )
+        for vw in bin_width[bin_list[0]].keys(): # getting the sides
+            bepi_df[f"{vw}_F_{bin_label}"] = weighted_bin_merge(bepi_df, 'bepi', 'p', bin_list, f"Side{vw}_{spec[0]}", bin_width, pa=vw)
+            bepi_df[f"{vw}_Func_{bin_label}"] = weighted_bin_merge(bepi_df, 'bepi', 'p', bin_list, [f"Side{vw}_{spec[0]}", '_stat_err'], bin_width, pa=vw)
+        print( bepi_df['1_F_7'].head() )
+        jax = input('Before should = after...')
+
+        # Make omnidirectional
+        flux_arr, unc_arr = ([] for i in range(2))
+        for tt in bepi_df.index:
+            farr, uarr = ([] for i in range(2))
+            for vw in bin_width[bin_list[0]].keys():
+                farr.append(bepi_df.loc[tt, f"{vw}_F_{bin_label}"])
+                uarr.append(bepi_df.loc[tt, f"{vw}_Func_{bin_label}"])
+            flux_arr.append(np.nanmean(farr))
+            unc_arr.append(np.nanmean(uarr))
+
+        bepi_dct = {'Time': bepi_df.index,
+                    'Flux': flux_arr,
+                    'Uncertainty': unc_arr}
+        bepi_df1 = pd.DataFrame.from_dict(bepi_dct)
+        bepi_df1.set_index('Time', inplace=True)
+
+        print(bepi_df1.head())
+
+        # Resample
+        bepi = bepi_df1.resample(resampling).agg({'Flux':'mean', 'Uncertainty': rms_mean})
+
+        return bepi, energy_range_lbl
 
 
 
